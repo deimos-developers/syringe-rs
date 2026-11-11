@@ -32,7 +32,7 @@ use crate::support::{
 };
 use crate::syringe_debugger::SyringeDebugger;
 
-const VERSION_STRING: &str = "syringe-rs 0.1.0 (SyringeEx 0.1.0.4, based on Syringe 0.7.2.0)";
+const VERSION_STRING: &str = concat!("syringe-rs ", env!("CARGO_PKG_VERSION"));
 
 fn get_arguments() -> Vec<String> {
     let mut argc = 0i32;
@@ -116,8 +116,8 @@ fn report_last_error(failure: &str, error: &LastError) -> u32 {
 
 fn report_invalid_arguments() -> u32 {
     message_box(
-        "syringe-rs cannot be run like that.\n\n\
-         Usage:\nsyringe-rs.exe <exe name> [-i=<injectedfile.dll> ...] [--args=\"<arguments>\"]",
+        "syringe cannot be run like that.\n\n\
+         Usage:\nsyringe.exe <exe name> [-i=<injectedfile.dll> ...] [--args=\"<arguments>\"]",
         VERSION_STRING,
         MB_OK | MB_ICONINFORMATION,
     );
@@ -134,7 +134,7 @@ fn run(arguments: &[String]) -> u32 {
         InitCommonControls();
     }
 
-    Log::open("syringe-rs.log");
+    Log::open("syringe.log");
 
     log_line!("run", "{}", VERSION_STRING);
     log_line!("run", "===============");

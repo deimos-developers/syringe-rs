@@ -395,6 +395,43 @@ impl SyringeDebugger {
         }
     }
 
+    /// Forwards a debuggee `OutputDebugString` message to the injector log.
+    fn log_debug_string(
+        &self,
+        info: windows_sys::Win32::System::Diagnostics::Debug::OUTPUT_DEBUG_STRING_INFO,
+    ) {
+        let length = info.nDebugStringLength as usize;
+        if length == 0 || info.lpDebugStringData.is_null() {
+            return;
+        }
+
+        let mut bytes = vec![0u8; length];
+        if !self.read_mem(
+            info.lpDebugStringData as *const c_void,
+            bytes.as_mut_ptr() as *mut c_void,
+            length as u32,
+        ) {
+            log_line!(
+                "log_debug_string",
+                "Could not read debug string at {:p}.",
+                info.lpDebugStringData
+            );
+            return;
+        }
+
+        let text = if info.fUnicode != 0 {
+            let words: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            String::from_utf16_lossy(&words)
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+
+        log_line!("log_debug_string", "{}", text.trim_end_matches('\0'));
+    }
+
     pub fn alloc_mem(
         &self,
         address: *mut c_void,
@@ -1644,7 +1681,10 @@ impl SyringeDebugger {
                     let info = unsafe { dbg_event.u.LoadDll };
                     unsafe { CloseHandle(info.hFile) };
                 }
-                OUTPUT_DEBUG_STRING_EVENT => {}
+                OUTPUT_DEBUG_STRING_EVENT => {
+                    let info = unsafe { dbg_event.u.DebugString };
+                    self.log_debug_string(info);
+                }
                 _ => {}
             }
 
@@ -2089,6 +2129,7 @@ impl SyringeDebugger {
 
     pub fn find_dlls(&mut self) {
         self.breakpoints.clear();
+        let mut loaded_dlls = BTreeSet::new();
 
         for dll in self.dlls.clone() {
             log_line!("find_dlls", "Searching for DLLs matching \"{}\"...", dll);
@@ -2129,6 +2170,7 @@ impl SyringeDebugger {
                 }
 
                 if can_load {
+                    loaded_dlls.insert(filename.clone());
                     for (eip, hooks) in buffer.hooks {
                         let info = self.breakpoints.entry(eip).or_default();
                         info.original_opcode = 0x00;
@@ -2171,6 +2213,19 @@ impl SyringeDebugger {
 
                 self.v_libraries.push(HookLibrary {
                     name: hook.lib_name(),
+                    exports: HashMap::new(),
+                    module: ptr::null_mut(),
+                });
+            }
+        }
+
+        // A recognized DLL with no hooks still needs a LoadLibrary call so its
+        // DllMain can run. C++ Syringe only loads hook hosts; this is a small
+        // superset that keeps no-hook diagnostic DLLs useful.
+        for name in loaded_dlls {
+            if !unique_libs.contains(&name) {
+                self.v_libraries.push(HookLibrary {
+                    name,
                     exports: HashMap::new(),
                     module: ptr::null_mut(),
                 });

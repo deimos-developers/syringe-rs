@@ -1,16 +1,20 @@
 [package]
 name = "syringe-rs"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Rust port of SyringeEx: a 32-bit Windows DLL injector and runtime hook loader"
-license = "LGPL-3.0-only"
+description = "A 32-bit Windows DLL injector and runtime hook loader, ported from SyringeEx"
+license = "GPL-3.0-only"
 readme = "README.md"
-keywords = ["dll-injection", "debugger", "hooking", "windows"]
+repository = "https://github.com/deimos-developers/syringe-rs"
+homepage = "https://github.com/deimos-developers/syringe-rs"
+authors = ["deimos-developers"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+keywords = ["dll-injection", "debugger", "hooking", "windows", "game-modding"]
 categories = ["development-tools::debugging", "os::windows-apis"]
 
 [[bin]]
-name = "syringe-rs"
+name = "syringe"
 path = "src/main.rs"
 
 [dependencies]

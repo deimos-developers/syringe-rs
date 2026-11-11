@@ -1,37 +1,58 @@
 # syringe-rs
 
-A Rust port of [SyringeEx](https://github.com/Phobos-developers/SyringeEx), a 32-bit Windows DLL
-injector and runtime hook loader. It launches a target executable under the Windows debugging API,
-loads one or more hook DLLs into the target, and rewrites hook sites with generated trampolines.
+`syringe-rs` is a Rust reimplementation of [SyringeEx](https://github.com/Phobos-developers/SyringeEx),
+a 32-bit Windows DLL injector and runtime hook loader for Command & Conquer: Yuri's Revenge.
 
-The port keeps the original command-line interface, PE/hook-file formats, and the C++ hook ABI used
-by SyringeEx hook DLLs.
+It starts a target executable under the Windows debugging API, loads one or more hook DLLs into the
+new process, and installs code hooks declared by those DLLs. The command-line interface, hook file
+formats, handshake protocol, feature flags, and C++ hook ABI are kept compatible with SyringeEx.
 
-## Features
+The Cargo package is named `syringe-rs`; the executable it produces is `syringe.exe`.
 
-- 32-bit Windows target process debugging via `WaitForDebugEvent` / `ContinueDebugEvent`.
-- DLL injection through remote `LoadLibraryA` / `GetProcAddress` calls.
-- Code hooks declared with `.syhks00` link sections or legacy `.inj` files.
-- Host DLL handshake support (`.syexe00` / `SyringeHandshake`) via `--handshakes`.
-- Relative-instruction fixup with Zydis: short branches, jumps, and calls are re-encoded as near
-  branches when copied into a trampoline.
-- Feature flags exported to hook DLLs:
-  - `ESPModification`
-  - `ZFPreservation`
-  - `ReladdrInstructionFixup`
-- C++-compatible register and hook ABI in `src/syringe_api.rs`.
+## Unofficial project and EA notice
+
+This is an unofficial community project. It is not affiliated with, endorsed by, or supported by
+Electronic Arts Inc.
+
+Command & Conquer, Yuri's Revenge, and all related names, marks, and assets are the property of
+Electronic Arts Inc. or their respective owners. Electronic Arts has not endorsed and does not
+support this product. Use it only with legally obtained copies of the game and in accordance with
+Electronic Arts' modding guidelines.
+
+## License
+
+This port is distributed under the **GNU General Public License, version 3 only**
+(`GPL-3.0-only`). See [`LICENSE`](LICENSE).
+
+The original SyringeEx code is licensed under the GNU Lesser General Public License, version 3.
+SyringeEx in turn is based on the original Syringe project by Patrick "pd" Dinklage, with
+contributions from Jan Newger and the Ares project.
+
+The `zydis` crate and the bundled Zydis library are distributed under the MIT License.
+
+## Background
+
+Syringe was originally written as an injector for Yuri's Revenge mods. It loads extension DLLs into
+the game process, redirects selected instructions to hook functions, and provides a small API for
+reading and modifying the game's registers and memory.
+
+SyringeEx modernized that codebase, added multithreaded hook support and feature negotiation, and
+kept the original hook ABI. `syringe-rs` translates that implementation to Rust while preserving the
+parts that hook DLLs depend on.
 
 ## Requirements
 
+- Windows x86 for running the injector and the target game.
 - Rust 1.85 or newer.
-- A 32-bit Windows target:
-  - MSVC: `i686-pc-windows-msvc`, plus Visual Studio Build Tools and the Windows SDK.
-  - MinGW-w64: `i686-pc-windows-gnu`, plus `i686-w64-mingw32-gcc`, `i686-w64-mingw32-g++`, and
-    CMake.
-- The `zydis` crate builds its bundled Zydis C sources with CMake, so a working C/C++ toolchain is
-  required at build time.
+- A 32-bit Windows target installed through `rustup`:
+  - `i686-pc-windows-msvc` with Visual Studio Build Tools and the Windows SDK, or
+  - `i686-pc-windows-gnu` with MinGW-w64.
+- A C/C++ toolchain and CMake at build time. The `zydis` crate compiles its bundled C sources with
+  CMake.
 
-## Build
+Cross-compiling from Linux to `i686-pc-windows-gnu` is supported.
+
+## Building
 
 MSVC:
 
@@ -40,7 +61,7 @@ rustup target add i686-pc-windows-msvc
 cargo build --release --target i686-pc-windows-msvc
 ```
 
-MinGW-w64 (cross-compiling from Linux is supported):
+MinGW-w64:
 
 ```bash
 rustup target add i686-pc-windows-gnu
@@ -51,60 +72,63 @@ CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=i686-w64-mingw32-gcc \
 cargo build --release --target i686-pc-windows-gnu
 ```
 
-The executable is written to
-`target/<target>/release/syringe-rs.exe`. The release profile enables fat LTO, one codegen unit,
-and `opt-level = 3`.
+The executable is written to `target/<target>/release/syringe.exe`.
 
-## Usage
+## Command-line usage
 
-The first argument that does not start with `-` is the target executable:
+### Executable selection
 
-```text
-syringe-rs.exe game.exe
-```
-
-Pass arguments to the target with `--args="..."`:
+The first argument that does not begin with `-` is the target executable:
 
 ```text
-syringe-rs.exe game.exe --args="-CD. -SPAWN"
+syringe.exe game.exe
 ```
 
-By default, every compatible DLL matching `*.dll` in the current directory is considered. To load
-only selected DLLs, use one or more `-i=` options:
+The injector creates the process suspended, attaches as its debugger, and resumes it after the
+initial breakpoint is reached.
+
+### Passing arguments to the target
+
+Use `--args="..."` to pass a command line to the target:
 
 ```text
-syringe-rs.exe game.exe -i=ExtensionA.dll -i=ExtensionB.dll
+syringe.exe game.exe --args="-CD. -SPAWN"
 ```
 
-Debugger lifetime flags:
+The text after `--args=` is forwarded as-is.
 
-- `--detach` — detach once all hooks have been placed.
+### DLL injection
+
+By default, `syringe-rs` scans the current directory for files matching `*.dll` and considers each
+one as a hook host. A DLL is loaded only if it is recognized as compatible (see below).
+
+To load specific DLLs, use one or more `-i=` options:
+
+```text
+syringe.exe game.exe -i=ExtensionA.dll -i=ExtensionB.dll
+```
+
+A recognized DLL with an empty hook section is still loaded, so its `DllMain` can run. This is a
+small superset of the original Syringe behavior.
+
+### Debugger lifetime
+
+- `--detach` — detach after hook installation instead of staying attached.
 - `--nodetach` — keep the debugger attached (default).
 - `--nowait` — do not wait for the target process to exit.
-- `--handshakes` — call `SyringeHandshake` in candidate DLLs before loading them.
+- `--handshakes` — call `SyringeHandshake` in candidate DLLs and let them accept or reject the host.
 
 Examples:
 
 ```text
-syringe-rs.exe game.exe
-syringe-rs.exe game.exe --detach
-syringe-rs.exe game.exe --detach --nowait
+syringe.exe game.exe --detach
+syringe.exe game.exe --detach --nowait
 ```
 
-The injector writes a UTF-8 log named `syringe-rs.log` in the current directory. Every line has the
-form:
+## Hook DLL format
 
-```text
-[HH:MM:SS:mmm] Debug: <rust_function>: <message>
-```
-
-## Hook DLLs
-
-Hook DLLs use the SyringeEx ABI. The C++ API header remains in the SyringeEx tree
-(`SyringeEx/include/Syringe.h`); the Rust-side layout and register helpers are mirrored in
-`src/syringe_api.rs`.
-
-Hooks can be declared in a `.syhks00` section:
+A hook DLL can declare hooks in a `.syhks00` section. The layout is the `HookDecl` structure from
+`Syringe.h`:
 
 ```cpp
 #include <Syringe.h>
@@ -116,80 +140,121 @@ DEFINE_HOOK(0x00401000, ExampleHook, 5)
 }
 ```
 
-or listed in a legacy `<dllname>.inj` file:
+Each declaration contains the hook address, the number of overwritten bytes, and a pointer to the
+hook name.
+
+For compatibility with older tooling, a DLL without a `.syhks00` section may instead be accompanied
+by a text file named `<dllname>.inj`. Each non-comment line has the form:
 
 ```text
 0x00401000 = ExampleHook, 5
 ```
 
-A hook DLL that exports `SyringeHandshake` can accept or reject a target. A DLL that wants to accept
-only specific hosts can provide a `.syexe00` section with `declhost` entries.
+A DLL that exports `SyringeHandshake` can inspect the host and accept or reject it. A DLL can also
+provide a `.syexe00` section with `declhost` entries to restrict which executables it accepts.
 
-## Feature Flags
+## Feature Flags API
 
-When a DLL is loaded, `syringe-rs` resolves exported booleans from the `SyringeFeatures` namespace
-and writes `true` into the ones it supports. Hook DLLs should default these flags to `false` and
-check them before using optional behavior.
+Feature flags let a DLL detect whether the running injector supports optional behavior. A DLL should
+assume `false` for every flag and check the flag before relying on the corresponding feature.
+
+### How it works
+
+When a compatible DLL is loaded, `syringe-rs` looks up exported boolean variables in the
+`SyringeFeatures` namespace and writes `true` into each supported flag. Older injectors leave the
+variables at their default `false`.
+
+### Using feature flags
+
+```cpp
+#include <Syringe.h>
+
+if (SyringeFeatures::ZFPreservation)
+{
+    // Zero Flag preservation is available.
+}
+else
+{
+    // Fall back, or refuse to install the hook.
+}
+```
+
+### Current feature flags
 
 | Flag | Meaning |
 | --- | --- |
-| `ESPModification` | Hooks may change ESP across the hook boundary. |
-| `ZFPreservation` | ZF is preserved across hook execution. |
-| `ReladdrInstructionFixup` | Relative JMP/CALL/Jcc instructions in overwritten code are relocated. |
+| `ESPModification` | Hook code may change ESP across the hook boundary. |
+| `ZFPreservation` | The Zero Flag is preserved after hook execution. |
+| `ReladdrInstructionFixup` | Relative JMP/CALL/Jcc instructions in overwritten code are relocated into trampolines. |
 
-## Project Layout
+All new injector capabilities beyond the original Syringe should be exposed as feature flags.
+
+### Adding a feature flag
+
+1. Add an exported boolean to the `SyringeFeatures` namespace in the public API header.
+2. Add the symbol name to the feature flag list in `src/syringe_debugger.rs`.
+3. Document the flag and its compatibility contract here.
+
+## Logging
+
+`syringe-rs` writes `syringe.log` in the current working directory. Each line has the form:
+
+```text
+[HH:MM:SS:mmm] Debug: <rust_function>: <message>
+```
+
+The log records command-line parsing, DLL discovery, PE information, hook installation, debugger
+events, and the target's exit code. Output debug strings from the target are forwarded to the same
+log.
+
+## Project layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/main.rs` | Entry point, command line, error reporting, `syringe-rs.log` setup. |
-| `src/syringe_debugger.rs` | Debug loop, DLL scanning, hook installation, loader/export resolution. |
-| `src/portable_executable.rs` | PE32 parser and import/export/section helpers. |
+| `src/main.rs` | Entry point, command line, error reporting, log setup. |
+| `src/syringe_debugger.rs` | Debug loop, DLL scanning, hook installation, loader and export resolution. |
+| `src/portable_executable.rs` | 32-bit PE parser and import/section helpers. |
 | `src/syringe_api.rs` | C++-compatible register, hook, host, and handshake declarations. |
 | `src/log.rs` | `Debug: <function>: ...` logging. |
-| `src/crc32.rs` | Hook-buffer checksum used by the handshake ABI. |
+| `src/crc32.rs` | Hook checksum used by the handshake ABI. |
 | `src/handle.rs` | RAII wrappers for Win32 handles and remote memory. |
 | `src/find_file.rs` | `FindFirstFileA` / `FindNextFileA` wrapper. |
-| `src/support.rs` | Command-line parsing, message formatting, path/string helpers. |
-| `src/rebuild_instructions_tests.rs` | Round-trip tests for relative-instruction rewriting. |
+| `src/support.rs` | Command-line parsing and string/error helpers. |
+| `src/rebuild_instructions_tests.rs` | Tests for relative-instruction rewriting. |
 
-## Tests
+## Testing
 
-The hook-rewrite tests can run on a Linux host with Wine and the GNU target:
+The hook-rewrite and PE parser tests can run on a Linux host with Wine and the GNU target:
 
 ```bash
 CARGO_TARGET_I686_PC_WINDOWS_GNU_RUNNER=wine \
 cargo test --target i686-pc-windows-gnu
 ```
 
-On Windows, run the same command without the runner variable. The suite covers 24 cases, including
-self-PE parsing, short/near branch rewriting, intra-trampoline targets, LOOP/JECXZ handling, and
-malformed-input guards.
+On Windows, omit the runner variable. The suite covers self-PE parsing, short and near branch
+rewriting, intra-trampoline targets, LOOP/JECXZ handling, and malformed-input guards.
 
-## Performance Notes
+## Compatibility and limitations
 
-Compared with a direct line-by-line translation:
+- 32-bit only. The injector, target process, and hook DLLs must all be x86.
+- Windows is required at runtime. Cross-compilation from Linux is supported for the GNU target.
+- The PE parser follows the original 32-bit parser and rejects truncated input instead of silently
+  continuing.
+- Hook installation writes to remote process memory. A failed patch can leave the target partially
+  modified; rollback is not attempted, matching SyringeEx.
+- `SyringeHandshake` receives a 0x100-byte message buffer; host DLLs must respect `cchMessage`.
+- The traditional `Syringe.h` C++ header is still the reference API for hook DLLs. The Rust-side
+  mirror exists for tests and documentation.
 
-- `PortableExecutable` keeps one open `File` handle for the lifetime of the parser instead of
-  reopening the executable for every import-name and thunk read.
-- Logging builds the timestamp once per line, takes the logger mutex once, and writes the timestamp,
-  message, and newline with three `fwrite` calls instead of one `fputc` per character.
-- Release builds use fat LTO and a single codegen unit.
+## Credits
 
-## Compatibility and Limitations
+- Original Syringe: Patrick "pd" Dinklage, with work by Jan Newger and the Ares project.
+- SyringeEx: the Phobos developers and contributors.
+- Zydis: the Zydis project and contributors.
+- `syringe-rs`: the deimos-developers contributors.
 
-- 32-bit only. The target process, hook DLLs, and injector must all be x86.
-- Windows only at runtime. Cross-compilation from Linux is supported for the GNU target.
-- The PE parser intentionally follows the original 32-bit parser and rejects truncated/malformed
-  input rather than silently continuing.
-- Hook installation modifies remote process memory. Failed patches can leave the target partially
-  modified; the injector does not attempt rollback, matching SyringeEx.
-- `SyringeHandshake` is called with a 0x100-byte message buffer; host DLLs must respect
-  `cchMessage`.
+## Legal
 
-## License
-
-The Rust port is licensed under **LGPL-3.0-only**, matching SyringeEx. See [`LICENSE`](LICENSE).
-
-Syringe was originally created by **Patrick "pd" Dinklage**, based in part on work by **Jan Newger**,
-and later maintained by contributors from the **Ares** project. SyringeEx extended and modernized
-that codebase. Zydis is licensed under the MIT License.
+This project is an unofficial community effort and is not affiliated with Electronic Arts Inc.
+Command & Conquer and Yuri's Revenge are trademarks of Electronic Arts Inc. Electronic Arts has not
+endorsed and does not support this product.
