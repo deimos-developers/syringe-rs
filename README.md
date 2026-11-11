@@ -28,8 +28,6 @@ The original SyringeEx code is licensed under the GNU Lesser General Public Lice
 SyringeEx in turn is based on the original Syringe project by Patrick "pd" Dinklage, with
 contributions from Jan Newger and the Ares project.
 
-The `zydis` crate and the bundled Zydis library are distributed under the MIT License.
-
 ## Background
 
 Syringe was originally written as an injector for Yuri's Revenge mods. It loads extension DLLs into
