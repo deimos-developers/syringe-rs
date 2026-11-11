@@ -1,0 +1,40 @@
+[package]
+name = "syringe-rs"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust port of SyringeEx: a 32-bit Windows DLL injector and runtime hook loader"
+license = "LGPL-3.0-only"
+readme = "README.md"
+keywords = ["dll-injection", "debugger", "hooking", "windows"]
+categories = ["development-tools::debugging", "os::windows-apis"]
+
+[[bin]]
+name = "syringe-rs"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Environment",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+zydis = { version = "4.1.1", default-features = false, features = ["std", "encoder"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
