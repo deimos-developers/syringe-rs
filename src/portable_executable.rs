@@ -147,21 +147,30 @@ impl PortableExecutable {
             return None;
         }
 
-        let mut buffer = [0u8; 0x100];
-        if self.file.read_exact(&mut buffer).is_err() {
-            return None;
+        let mut bytes = Vec::with_capacity(0x40);
+        let mut byte = [0u8; 1];
+        loop {
+            match self.file.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if byte[0] == 0 => break,
+                Ok(_) => bytes.push(byte[0]),
+            }
+            if bytes.len() == 0x100 {
+                break;
+            }
         }
 
-        buffer[0xFF] = 0;
-        let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(0xFF);
-        Some(String::from_utf8_lossy(&buffer[..length]).into_owned())
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn find_section(&self, name: &str) -> Option<&IMAGE_SECTION_HEADER> {
-        assert!(name.len() <= 8);
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes.len() > 8 {
+            return None;
+        }
 
         let mut padded = [0u8; 8];
-        padded[..name.len()].copy_from_slice(name.as_bytes());
+        padded[..bytes.len()].copy_from_slice(bytes);
 
         self.sections.iter().find(|section| section.Name == padded)
     }
@@ -208,7 +217,13 @@ impl PortableExecutable {
             return false;
         }
 
+        // PE files allow at most 96 sections; reject malformed counts before
+        // allocating, so a corrupt header cannot request an enormous Vec.
         let section_count = self.pe_header.FileHeader.NumberOfSections as usize;
+        if section_count == 0 || section_count > 96 {
+            return false;
+        }
+        self.sections.clear();
         self.sections.resize(section_count, unsafe { zeroed() });
 
         for section in &mut self.sections {
@@ -228,7 +243,8 @@ impl PortableExecutable {
         let import_directory =
             self.pe_header.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
 
-        if import_directory.Size != 0 {
+        self.imports.clear();
+        if import_directory.Size != 0 && import_directory.VirtualAddress != 0 {
             if file
                 .seek(SeekFrom::Start(Self::virtual_to_raw_in(
                     &self.sections,
@@ -239,7 +255,7 @@ impl PortableExecutable {
                 return false;
             }
 
-            loop {
+            for _ in 0..0x1000 {
                 let mut descriptor: IMAGE_IMPORT_DESCRIPTOR = unsafe { zeroed() };
                 if file
                     .read_exact(unsafe {
@@ -286,7 +302,7 @@ impl PortableExecutable {
                     return false;
                 }
 
-                loop {
+                for _ in 0..0x1000 {
                     let mut thunk: IMAGE_THUNK_DATA32 = unsafe { zeroed() };
                     if file
                         .read_exact(unsafe {

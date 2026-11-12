@@ -56,3 +56,26 @@ impl Crc32 {
         self.value = 0xFFFF_FFFF;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Crc32;
+
+    #[test]
+    fn known_crc32_vectors() {
+        let mut crc = Crc32::new();
+        assert_eq!(crc.compute(b""), 0);
+        assert_eq!(crc.value(), 0);
+        crc.reset();
+        assert_eq!(crc.compute(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn chained_computation_matches_one_shot() {
+        let mut chained = Crc32::new();
+        chained.compute(b"1234");
+        let chained = chained.compute(b"56789");
+        let mut one_shot = Crc32::new();
+        assert_eq!(chained, one_shot.compute(b"123456789"));
+    }
+}

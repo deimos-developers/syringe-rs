@@ -9,13 +9,17 @@ readme = "README.md"
 repository = "https://github.com/deimos-developers/syringe-rs"
 homepage = "https://github.com/deimos-developers/syringe-rs"
 authors = ["deimos-developers"]
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md", "LICENSE"]
 keywords = ["dll-injection", "debugger", "hooking", "windows", "game-modding"]
 categories = ["development-tools::debugging", "os::windows-apis"]
 
 [[bin]]
 name = "syringe"
 path = "src/main.rs"
+
+[lib]
+name = "syringe_rs"
+path = "src/lib.rs"
 
 [dependencies]
 windows-sys = { version = "0.61.2", features = [

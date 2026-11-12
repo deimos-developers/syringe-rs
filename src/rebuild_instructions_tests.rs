@@ -4,7 +4,7 @@
 
 use zydis::{AllOperands, Decoder, Instruction, MachineMode, Mnemonic, StackWidth, ffi};
 
-use crate::syringe_debugger::SyringeDebugger;
+use crate::debugger::SyringeDebugger;
 
 fn rebuild(bytes: &[u8], original_addr: u32, new_addr: u32) -> Vec<u8> {
     SyringeDebugger::rebuild_instructions(bytes, original_addr, new_addr, "")

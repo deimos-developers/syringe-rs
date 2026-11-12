@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CString, c_void};
-use std::io::Read;
 use std::mem::{size_of, zeroed};
 use std::ptr;
 
+use crate::handle::{ThreadHandle, VirtualMemoryHandle};
 use windows_sys::Win32::Foundation::{
     CloseHandle, DBG_EXCEPTION_NOT_HANDLED, ERROR_ARITHMETIC_OVERFLOW, ERROR_ERRORS_ENCOUNTERED,
     ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ENOUGH_MEMORY, ERROR_PROC_NOT_FOUND, EXCEPTION_BREAKPOINT,
@@ -16,12 +16,10 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     CREATE_THREAD_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcessStop,
     EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT, EXIT_THREAD_DEBUG_EVENT,
     FlushInstructionCache, GetThreadContext, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS32,
-    IMAGE_NT_OPTIONAL_HDR32_MAGIC, IMAGE_SECTION_HEADER, LOAD_DLL_DEBUG_EVENT,
-    OUTPUT_DEBUG_STRING_EVENT, RIP_EVENT, ReadProcessMemory, SetThreadContext, WaitForDebugEvent,
-    WriteProcessMemory,
+    IMAGE_NT_OPTIONAL_HDR32_MAGIC, LOAD_DLL_DEBUG_EVENT, OUTPUT_DEBUG_STRING_EVENT, RIP_EVENT,
+    ReadProcessMemory, SetThreadContext, WaitForDebugEvent, WriteProcessMemory,
 };
 use windows_sys::Win32::System::Environment::SetEnvironmentVariableA;
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows_sys::Win32::System::Memory::{
     MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, VirtualQueryEx,
 };
@@ -39,11 +37,13 @@ use zydis::{
 
 use crate::crc32::Crc32;
 use crate::find_file::FindFile;
-use crate::handle::{ModuleHandle, ThreadHandle, VirtualMemoryHandle};
+
 use crate::log_line;
 use crate::portable_executable::PortableExecutable;
 use crate::support::{LastError, throw_lasterror, throw_lasterror_or};
-use crate::syringe_api::SyringeHandshakeInfo;
+use crate::syringe_api::FEATURE_FLAGS;
+
+mod discovery;
 
 const MAX_NAME_LENGTH: usize = 0x100;
 const INT3: u8 = 0xCC;
@@ -55,12 +55,6 @@ const DETACH_FLAG: &str = "--detach";
 const NODETACH_FLAG: &str = "--nodetach";
 const NOWAIT_FLAG: &str = "--nowait";
 const HANDSHAKES_FLAG: &str = "--handshakes";
-
-const FEATURE_FLAG_NAMES: [&str; 3] = [
-    "ESPModification",
-    "ZFPreservation",
-    "ReladdrInstructionFixup",
-];
 
 const CODE_CALL: [u8; 73] = [
     0x60, 0x9C, 0x68, 0x00, 0x00, 0x00, 0x00, 0x54, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x08,
@@ -187,21 +181,6 @@ impl Default for ExchangeData {
             proc_name: [0; MAX_NAME_LENGTH],
         }
     }
-}
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy)]
-struct HookDecl {
-    hook_addr: u32,
-    hook_size: u32,
-    hook_name_ptr: u32,
-}
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy)]
-struct HostDecl {
-    host_checksum: u32,
-    host_name_ptr: u32,
 }
 
 struct HookBuffer {
@@ -384,7 +363,7 @@ impl SyringeDebugger {
 
     pub fn read_mem(&self, address: *const c_void, buffer: *mut c_void, size: u32) -> bool {
         let mut read = 0usize;
-        unsafe {
+        let ok = unsafe {
             ReadProcessMemory(
                 self.working_handle,
                 address,
@@ -392,7 +371,8 @@ impl SyringeDebugger {
                 size as usize,
                 &mut read,
             ) != 0
-        }
+        };
+        ok && read == size as usize
     }
 
     /// Forwards a debuggee `OutputDebugString` message to the injector log.
@@ -492,7 +472,9 @@ impl SyringeDebugger {
         }
 
         let mut opcode = 0u8;
-        self.read_mem(address, &mut opcode as *mut u8 as *mut c_void, 1);
+        if !self.read_mem(address, &mut opcode as *mut u8 as *mut c_void, 1) {
+            return false;
+        }
 
         let info = self.breakpoints.entry(key).or_default();
         info.original_opcode = opcode;
@@ -2134,7 +2116,14 @@ impl SyringeDebugger {
         for dll in self.dlls.clone() {
             log_line!("find_dlls", "Searching for DLLs matching \"{}\"...", dll);
 
-            let pattern = CString::new(dll).unwrap();
+            let Ok(pattern) = CString::new(dll.as_bytes()) else {
+                log_line!(
+                    "find_dlls",
+                    "Ignoring pattern with an embedded NUL: {:?}",
+                    dll
+                );
+                continue;
+            };
             let mut file = FindFile::new(&pattern);
 
             while file.is_valid() {
@@ -2204,7 +2193,7 @@ impl SyringeDebugger {
             let hook = unsafe { &**hook };
 
             if unique_libs.insert(hook.lib_name()) {
-                for flag_name in FEATURE_FLAG_NAMES {
+                for flag_name in FEATURE_FLAGS {
                     let mut entry = FeatureFlagEntry::default();
                     copy_name(&mut entry.lib, &hook.lib_name());
                     copy_name(&mut entry.symbol, flag_name);
@@ -2238,211 +2227,5 @@ impl SyringeDebugger {
             self.v_feature_flags.len()
         );
         log_line!();
-    }
-
-    fn parse_inj_file_hooks(lib: &str, hooks: &mut HookBuffer) -> bool {
-        let inj = format!("{}.inj", lib);
-        let Ok(mut file) = std::fs::File::open(inj) else {
-            return false;
-        };
-
-        const SIZE: usize = 0x100;
-        let mut line = [0u8; SIZE];
-
-        loop {
-            let mut length = 0;
-
-            while length < SIZE - 1 {
-                let mut byte = [0u8; 1];
-                match file.read(&mut byte) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        line[length] = byte[0];
-                        length += 1;
-                        if byte[0] == b'\n' {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if length == 0 {
-                break;
-            }
-
-            let first = line[0];
-            if first == b';' || first == b'\r' || first == b'\n' {
-                continue;
-            }
-
-            let text = String::from_utf8_lossy(&line[..length]);
-            let Some((address_part, rest)) = text.split_once('=') else {
-                continue;
-            };
-
-            let address = address_part.trim();
-            let address = address
-                .strip_prefix("0x")
-                .or_else(|| address.strip_prefix("0X"))
-                .unwrap_or(address);
-            let Ok(eip) = u32::from_str_radix(address, 16) else {
-                continue;
-            };
-
-            let (function_part, override_part) = rest.split_once(',').unwrap_or((rest, ""));
-            let function = function_part
-                .trim_start()
-                .split(|c: char| {
-                    c == ' ' || c == '\t' || c == ';' || c == ',' || c == '\r' || c == '\n'
-                })
-                .next()
-                .unwrap_or("");
-
-            if function.is_empty() {
-                continue;
-            }
-
-            let overridden_text = override_part.trim();
-            let overridden = parse_hex_prefix(overridden_text).unwrap_or(0);
-            hooks.add_named(
-                eip as usize as *mut c_void,
-                lib,
-                function,
-                overridden as usize,
-            );
-        }
-
-        true
-    }
-
-    fn can_host_dll(&self, dll: &mut PortableExecutable, hosts: &IMAGE_SECTION_HEADER) -> bool {
-        const SIZE: u32 = size_of::<HostDecl>() as u32;
-
-        let base = dll.image_base();
-        let begin = hosts.PointerToRawData;
-        let end = begin.wrapping_add(hosts.SizeOfRawData);
-
-        let mut pointer = begin;
-        while pointer < end {
-            let mut bytes = [0u8; size_of::<HostDecl>()];
-            if !dll.read_bytes(pointer, SIZE as usize, &mut bytes) {
-                break;
-            }
-
-            let host_decl: HostDecl =
-                unsafe { ptr::read_unaligned(bytes.as_ptr() as *const HostDecl) };
-
-            if host_decl.host_name_ptr != 0 {
-                let raw_name_ptr = dll.virtual_to_raw(host_decl.host_name_ptr.wrapping_sub(base));
-
-                if let Some(mut host_name) = dll.read_c_string(raw_name_ptr) {
-                    host_name.push_str(".exe");
-
-                    if host_name.eq_ignore_ascii_case(&self.exe) {
-                        return true;
-                    }
-                }
-            }
-
-            pointer = pointer.wrapping_add(SIZE);
-        }
-
-        false
-    }
-
-    fn parse_hooks_section(
-        &self,
-        dll: &mut PortableExecutable,
-        hooks: &IMAGE_SECTION_HEADER,
-        buffer: &mut HookBuffer,
-    ) -> bool {
-        const SIZE: u32 = size_of::<HookDecl>() as u32;
-
-        let base = dll.image_base();
-        let filename = dll.filename().to_string();
-        let begin = hooks.PointerToRawData;
-        let end = begin.wrapping_add(hooks.SizeOfRawData);
-
-        let mut pointer = begin;
-        while pointer < end {
-            let mut bytes = [0u8; size_of::<HookDecl>()];
-            if !dll.read_bytes(pointer, SIZE as usize, &mut bytes) {
-                log_line!("parse_hooks_section", "bytes read failed");
-                return false;
-            }
-
-            let hook_decl: HookDecl =
-                unsafe { ptr::read_unaligned(bytes.as_ptr() as *const HookDecl) };
-
-            if hook_decl.hook_name_ptr != 0 {
-                let raw_name_ptr = dll.virtual_to_raw(hook_decl.hook_name_ptr.wrapping_sub(base));
-
-                if let Some(hook_name) = dll.read_c_string(raw_name_ptr) {
-                    buffer.add_named(
-                        hook_decl.hook_addr as usize as *mut c_void,
-                        &filename,
-                        &hook_name,
-                        hook_decl.hook_size as usize,
-                    );
-                }
-            }
-
-            pointer = pointer.wrapping_add(SIZE);
-        }
-
-        true
-    }
-
-    fn handshake(&self, lib: &str, hooks: i32, crc: u32) -> Option<bool> {
-        if !self.b_handshakes {
-            log_line!("handshake", "Skipping handshake for DLL: \"{}\"", lib);
-            return None;
-        }
-
-        let library_name = CString::new(lib).unwrap();
-        let module = unsafe { LoadLibraryA(library_name.as_ptr() as *const u8) };
-        let module = ModuleHandle::new(module);
-
-        if !module.is_valid() {
-            return None;
-        }
-
-        let proc = unsafe { GetProcAddress(module.get(), b"SyringeHandshake\0".as_ptr()) };
-
-        let Some(proc) = proc else {
-            return None;
-        };
-
-        let func: unsafe extern "C" fn(*mut SyringeHandshakeInfo) -> i32 =
-            unsafe { std::mem::transmute(proc) };
-
-        log_line!("handshake", "Calling \"{}\" ...", lib);
-
-        const SIZE: usize = 0x100;
-        let mut buffer = vec![0u8; SIZE + 1];
-        let mut info = SyringeHandshakeInfo {
-            cb_size: size_of::<SyringeHandshakeInfo>() as i32,
-            num_hooks: hooks,
-            checksum: crc,
-            exe_filesize: self.dw_exe_size,
-            exe_timestamp: self.dw_time_stamp,
-            exe_crc: self.dw_exe_crc,
-            cch_message: SIZE as i32,
-            message: buffer.as_mut_ptr() as *mut i8,
-        };
-
-        let result = unsafe { func(&mut info) };
-
-        if result >= 0 {
-            buffer[SIZE] = 0;
-            let length = buffer.iter().position(|&value| value == 0).unwrap_or(SIZE);
-            let answer = String::from_utf8_lossy(&buffer[..length]);
-
-            log_line!("handshake", "Answers \"{}\" ({:X})", answer, result);
-            Some(result == 0)
-        } else {
-            log_line!("handshake", "Failed ({:X})", result);
-            Some(false)
-        }
     }
 }

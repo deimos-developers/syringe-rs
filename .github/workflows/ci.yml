@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, lint, host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Host tests and examples
+        run: cargo test --all-targets
+
+  windows:
+    name: Windows x86 build and tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (x86)
+        run: cargo test --target i686-pc-windows-msvc
+      - name: Release build (x86)
+        run: cargo build --release --target i686-pc-windows-msvc
+      - name: Upload syringe.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: syringe-rs-windows-x86
+          path: target/i686-pc-windows-msvc/release/syringe.exe

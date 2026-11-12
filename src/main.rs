@@ -5,35 +5,38 @@
 // translation faithful and silence dead-code warnings for that surface.
 #![allow(dead_code)]
 
-mod crc32;
-mod find_file;
-mod handle;
-mod log;
-mod portable_executable;
-mod rebuild_instructions_tests;
-mod support;
-mod syringe_api;
-mod syringe_debugger;
+#[cfg(windows)]
+use syringe_rs::debugger::SyringeDebugger;
+#[cfg(windows)]
+use syringe_rs::log::Log;
+#[cfg(windows)]
+use syringe_rs::log_line;
+#[cfg(windows)]
+use syringe_rs::support::{
+    InvalidCommandArguments, LastError, parse_command_line, printable_join, replace,
+};
 
+#[cfg(windows)]
 use std::ffi::{CString, c_void};
 
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, ERROR_SUCCESS, LocalFree};
+#[cfg(windows)]
 use windows_sys::Win32::Globalization::{CP_UTF8, WideCharToMultiByte};
+#[cfg(windows)]
 use windows_sys::Win32::System::Environment::GetCommandLineW;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Controls::InitCommonControls;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxA,
 };
 
-use crate::log::Log;
-use crate::support::{
-    InvalidCommandArguments, LastError, parse_command_line, printable_join, replace,
-};
-use crate::syringe_debugger::SyringeDebugger;
-
 const VERSION_STRING: &str = concat!("syringe-rs ", env!("CARGO_PKG_VERSION"));
 
+#[cfg(windows)]
 fn get_arguments() -> Vec<String> {
     let mut argc = 0i32;
     let argv_w = unsafe { CommandLineToArgvW(GetCommandLineW(), &mut argc) };
@@ -85,6 +88,7 @@ fn get_arguments() -> Vec<String> {
     argv
 }
 
+#[cfg(windows)]
 fn message_box(text: &str, caption: &str, style: u32) {
     let text = text.split('\0').next().unwrap_or("");
     let text = CString::new(text).unwrap_or_default();
@@ -101,6 +105,7 @@ fn message_box(text: &str, caption: &str, style: u32) {
     };
 }
 
+#[cfg(windows)]
 fn report_last_error(failure: &str, error: &LastError) -> u32 {
     let message = replace(&error.message, "%1", &error.insert);
     log_line!("report_last_error", "{} ({})", message, error.error as i32);
@@ -114,6 +119,7 @@ fn report_last_error(failure: &str, error: &LastError) -> u32 {
     error.error
 }
 
+#[cfg(windows)]
 fn report_invalid_arguments() -> u32 {
     message_box(
         "syringe cannot be run like that.\n\n\
@@ -129,6 +135,7 @@ fn report_invalid_arguments() -> u32 {
     ERROR_INVALID_PARAMETER
 }
 
+#[cfg(windows)]
 fn run(arguments: &[String]) -> u32 {
     unsafe {
         InitCommonControls();
@@ -195,7 +202,13 @@ fn run(arguments: &[String]) -> u32 {
     exit_code
 }
 
+#[cfg(windows)]
 fn main() {
     let exit_code = run(&get_arguments());
     std::process::exit(exit_code as i32);
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("syringe is a Windows-only tool; build for i686-pc-windows-gnu/msvc.");
 }
