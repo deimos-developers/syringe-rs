@@ -114,6 +114,7 @@ pub struct SyringeHandshakeInfo {
 }
 
 impl SyringeHandshakeInfo {
+<<<<<<< HEAD
     /// Creates a handshake record with a null message pointer.
     pub const fn new() -> Self {
         Self {
@@ -235,4 +236,174 @@ mod tests {
             ]
         );
     }
+=======
+    /// Number of writable bytes in [`Self::message`], zero if there is no
+    /// buffer. `cch_message` includes the terminating NUL.
+    pub fn message_capacity(&self) -> usize {
+        if self.cch_message <= 0 || self.message.is_null() {
+            0
+        } else {
+            self.cch_message as usize
+        }
+    }
+
+    /// Copies `message` (truncated to fit) and a NUL terminator into the
+    /// loader-provided buffer.
+    ///
+    /// # Safety
+    ///
+    /// If [`Self::message`] is non-null it must point to at least
+    /// [`Self::cch_message`] writable bytes.
+    pub unsafe fn write_message(&mut self, message: &str) {
+        let capacity = self.message_capacity();
+        if capacity == 0 {
+            return;
+        }
+        let bytes = message.as_bytes();
+        let length = bytes.len().min(capacity - 1);
+        // SAFETY: the caller guarantees the buffer size; `length < capacity`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.message.cast::<u8>(), length);
+            self.message.add(length).write(0);
+        }
+    }
+}
+
+/// The signature of the optional `SyringeHandshake` export.
+pub type SyringeHandshakeFunc =
+    Option<unsafe extern "C" fn(info: *mut SyringeHandshakeInfo) -> i32>;
+
+/// Feature flags queried by the loader. `syringe-rs` writes `1` into every
+/// exported flag it finds; the exports are optional.
+#[unsafe(no_mangle)]
+pub static mut ESPModification: bool = false;
+#[unsafe(no_mangle)]
+pub static mut ZFPreservation: bool = false;
+#[unsafe(no_mangle)]
+pub static mut ReladdrInstructionFixup: bool = false;
+
+/// Name of the section holding [`HookDecl`] entries.
+pub const HOOKS_SECTION: &str = ".syhks00";
+/// Name of the section holding [`HostDecl`] entries.
+pub const HOSTS_SECTION: &str = ".syexe00";
+
+// Layout checks against the C++ definitions. `Registers` must be exactly the
+// stack image built by the loader's `pushad; pushfd; push site; push esp`.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<LimitedRegister>() == 4);
+    assert!(size_of::<ExtendedRegister>() == 4);
+    assert!(size_of::<StackRegister>() == 4);
+    assert!(size_of::<Registers>() == 40);
+    assert!(offset_of!(Registers, origin) == 0);
+    assert!(offset_of!(Registers, flags) == 4);
+    assert!(offset_of!(Registers, edi) == 8);
+    assert!(offset_of!(Registers, esi) == 12);
+    assert!(offset_of!(Registers, ebp) == 16);
+    assert!(offset_of!(Registers, esp) == 20);
+    assert!(offset_of!(Registers, ebx) == 24);
+    assert!(offset_of!(Registers, edx) == 28);
+    assert!(offset_of!(Registers, ecx) == 32);
+    assert!(offset_of!(Registers, eax) == 36);
+
+    assert!(size_of::<HookDecl>() == 16);
+    assert!(align_of::<HookDecl>() == 16);
+    assert!(offset_of!(HookDecl, hook_addr) == 0);
+    assert!(offset_of!(HookDecl, hook_size) == 4);
+    assert!(offset_of!(HookDecl, hook_name) == 8);
+
+    assert!(size_of::<HostDecl>() == 16);
+    assert!(align_of::<HostDecl>() == 16);
+    assert!(offset_of!(HostDecl, host_checksum) == 0);
+};
+
+#[cfg(target_pointer_width = "32")]
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<SyringeHandshakeInfo>() == 32);
+    assert!(offset_of!(SyringeHandshakeInfo, message) == 28);
+    assert!(offset_of!(HostDecl, host_name) == 4);
+};
+
+// ---------------------------------------------------------------------------
+// Macros mirroring Syringe.h
+// ---------------------------------------------------------------------------
+
+/// Declares a hook: emits one [`HookDecl`] into `.syhks00`.
+///
+/// `func` must be the name of an exported hook proc with the [`HookProc`]
+/// signature. `hook` must be a literal address (it is stringified into the
+/// static's symbol name).
+///
+/// ```ignore
+/// #[unsafe(no_mangle)]
+/// pub extern "C" fn MyHook(regs: *mut deimos::syringe_api::Registers) -> u32 {
+///     // ...
+///     0
+/// }
+/// deimos::declhook!(0x4F4583, MyHook, 6);
+/// ```
+#[macro_export]
+macro_rules! declhook {
+    ($hook:expr, $func:ident, $size:expr) => {
+        const _: () = {
+            #[used]
+            #[allow(dead_code)]
+            #[unsafe(export_name = concat!("deimos_hook_decl_", stringify!($hook), "_", stringify!($func)))]
+            #[unsafe(link_section = ".syhks00")]
+            static HOOK_DECL: $crate::syringe_api::HookDecl = $crate::syringe_api::HookDecl::new(
+                $hook,
+                $size,
+                concat!(stringify!($func), "\0").as_ptr() as *const ::core::ffi::c_char,
+            );
+        };
+    };
+}
+
+/// C++ `DEFINE_HOOK_AGAIN`: a second hook declaration for the same proc.
+#[macro_export]
+macro_rules! declhook_again {
+    ($hook:expr, $func:ident, $size:expr) => {
+        $crate::declhook!($hook, $func, $size);
+    };
+}
+
+/// C++ `declhost`: declares which executable this DLL can extend.
+///
+/// The loader compares `name + ".exe"` with the running executable, so pass
+/// the executable name without the extension.
+#[macro_export]
+macro_rules! declhost {
+    ($exe:ident, $checksum:expr) => {
+        const _: () = {
+            #[used]
+            #[allow(dead_code)]
+            #[unsafe(export_name = concat!("deimos_host_decl_", stringify!($exe)))]
+            #[unsafe(link_section = ".syexe00")]
+            static HOST_DECL: $crate::syringe_api::HostDecl = $crate::syringe_api::HostDecl::new(
+                $checksum,
+                concat!(stringify!($exe), "\0").as_ptr() as *const ::core::ffi::c_char,
+            );
+        };
+    };
+}
+
+/// Declares a hook and defines its exported proc in one step.
+///
+/// ```ignore
+/// deimos::define_hook!(0x4F4583, MyHook, 6, |regs| {
+///     // `regs` is *mut deimos::syringe_api::Registers
+///     0
+/// });
+/// ```
+#[macro_export]
+macro_rules! define_hook {
+    ($hook:expr, $func:ident, $size:expr, |$regs:ident| $body:block) => {
+        $crate::declhook!($hook, $func, $size);
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $func($regs: *mut $crate::syringe_api::Registers) -> u32 $body
+    };
+>>>>>>> ec8d38839eaeb20a13a05de201f5521f1a74d862
 }
