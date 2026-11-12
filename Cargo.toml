@@ -1,6 +1,6 @@
 [package]
 name = "syringe-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A 32-bit Windows DLL injector and runtime hook loader, ported from SyringeEx"
